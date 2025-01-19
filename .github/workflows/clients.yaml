@@ -1,0 +1,452 @@
+name: Update Multiple Clients v.9.11
+
+on:
+  push:
+    paths:
+      - .clients
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  update_html_files:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+
+      - name: Check if .clients file exists
+        id: check_clients
+        run: if [[ -f .clients ]]; then echo "exists=true" >> $GITHUB_ENV; else echo "exists=false" >> $GITHUB_ENV; fi
+
+      - name: Abort if .clients file does not exist
+        if: env.exists == 'false'
+        run: echo "No .clients file found, aborting operation." && exit 1
+
+      - name: Check if .clients file is empty
+        if: env.exists == 'true'
+        run: |
+          if [[ ! -s .clients ]]; then
+            echo "File is empty, nothing to do." && exit 0
+          fi
+
+      - name: Identify Clients in .clients
+        if: env.exists == 'true'
+        id: identify_clients
+        run: |
+          # Function to escape special characters for sed
+          escape_for_sed() {
+            echo "$1" | sed -e 's/[\/&]/\\&/g'
+          }
+          # Regex for extracting address from .clients
+          extract_address_from_clients() {
+            local input="$1"
+            # Heuristic approach: if it contains a combination of letters, numbers, and common address separators
+            if [[ "$input" =~ [a-zA-Z] ]] && [[ "$input" =~ [0-9] ]] && [[ "$input" =~ [\.,/] ]]; then
+              echo "$input"
+            else
+              echo ""
+            fi
+          }
+
+          CLIENT_DATA=""
+          CLIENT_NUM=1
+
+          while IFS= read -r LINE; do
+            WAURL=""
+            PHURL=""
+            NAME=""
+            PHONE=""
+            FILTER=""
+            ADDRESS=""
+             IFS='|' read -ra PARTS <<< "$LINE"
+
+            for PART in "${PARTS[@]}"; do
+              TRIMMED_PART="$(echo "$PART" | xargs)"
+              if [[ $TRIMMED_PART == https://* ]]; then
+                if [[ $TRIMMED_PART == *💬* ]]; then
+                  WAURL=$TRIMMED_PART
+                elif [[ $TRIMMED_PART == *📞* ]]; then
+                  PHURL=$TRIMMED_PART
+                fi
+              elif [[ $TRIMMED_PART =~ ^[0-9[:space:]]+$ ]]; then
+                PHONE=$TRIMMED_PART
+              elif [[ $TRIMMED_PART =~ [A-Z] ]]; then
+                 if [[ -z "$NAME" ]]; then
+                      NAME=$TRIMMED_PART
+                  fi
+              else
+                  ADDRESS_TEMP=$(extract_address_from_clients "$TRIMMED_PART")
+                    if [ -n "$ADDRESS_TEMP" ]; then
+                        ADDRESS=$ADDRESS_TEMP
+                    else
+                        if [ -z "$FILTER" ]; then
+                             FILTER=$TRIMMED_PART
+                        fi
+                    fi
+                fi
+            done
+           echo "Processing Client $CLIENT_NUM ($NAME):"
+           echo "WAURL: $WAURL"
+           echo "PHURL: $PHURL"
+           echo "NAME: $NAME"
+           echo "PHONE: $PHONE"
+           echo "FILTER: $FILTER"
+           echo "ADDRESS: $ADDRESS"
+
+           CLIENT_DATA="$CLIENT_DATA"$"$WAURL|$PHURL|$NAME|$PHONE|$FILTER|$ADDRESS\n"
+             ((CLIENT_NUM++))
+          done < .clients
+
+          echo "client_data<<EOF" >> $GITHUB_ENV
+          echo "${CLIENT_DATA}" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+
+      - name: Process Replace Clients
+        if: env.exists == 'true'
+        run: |
+          # Function to escape special characters for sed
+          escape_for_sed() {
+            echo "$1" | sed -e 's/[\/&]/\\&/g'
+          }
+
+          # Function to create grep pattern from filter
+          create_grep_pattern() {
+            local filter="$1"
+            # Remove all spaces from the filter
+            filter="${filter// /}"
+            local pattern=""
+
+            # Check if the filter contains ':'
+            if [[ "$filter" == *:* ]]; then
+                # Complex filter
+                IFS=';' read -ra FILTER_PARTS <<< "$filter"
+                for part in "${FILTER_PARTS[@]}"; do
+                    IFS=':' read -r category cities <<< "$part"
+                    IFS=',' read -ra CITIES <<< "$cities"
+                    IFS=',' read -ra CATEGORIES <<< "$category"
+                    for city in "${CITIES[@]}"; do
+                        # Skip negative matches (they will be handled later)
+                        if [[ "$city" != -* ]]; then
+                            for cat in "${CATEGORIES[@]}"; do
+                                # Positive match: include this city
+                                if [ -n "$pattern" ]; then
+                                    pattern+=$'\n'
+                                fi
+                                pattern+="$cat.*$city"
+                            done
+                        fi
+                    done
+                done
+            else
+                # Simple filter
+                IFS=',' read -ra FILTER_PARTS <<< "$filter"
+                for part in "${FILTER_PARTS[@]}"; do
+                    # Skip negative matches (they will be handled later)
+                    if [[ "$part" != -* ]]; then
+                        # Positive match: include this part
+                        if [ -n "$pattern" ]; then
+                            pattern+=$'\n'
+                        fi
+                        pattern+="$part"
+                    fi
+                done
+            fi
+            echo "$pattern"
+          }
+
+          # Function to find files matching pattern
+          find_matching_files() {
+            local pattern="$1"
+            local filter="$2"  # Pass the original filter to check for negative matches
+            local matching_files=""
+            local files_to_filter
+
+            # First, find files matching the positive pattern
+            if [ -n "$pattern" ]; then
+                files_to_filter=$(find . -type f -name "*.html" | grep -Ei "$pattern" || true)
+            else
+                files_to_filter=$(find . -type f -name "*.html")
+            fi
+
+            if [ -z "$files_to_filter" ]; then
+                echo ""
+                return
+            fi
+
+            matching_files="$files_to_filter"
+
+            # Check if there are negative matches in the filter
+            if [[ "$filter" == *-* ]]; then
+              # Create a combined grep expression for negative matches
+                local negative_patterns=""
+                IFS=',' read -ra FILTER_PARTS <<< "$filter"
+                for part in "${FILTER_PARTS[@]}"; do
+                    if [[ "$part" == -* ]]; then
+                        negative_match="${part:1}"
+                        if [ -n "$negative_patterns" ]; then
+                            negative_patterns="$negative_patterns|$negative_match"
+                        else
+                            negative_patterns="$negative_match"
+                        fi
+                    fi
+                done
+
+                if [ -n "$negative_patterns" ]; then
+                  matching_files=$(echo "$matching_files" | grep -ivE "$negative_patterns" || true)
+                fi
+            fi
+
+            # Remove duplicate files and empty lines
+            echo "$matching_files" | sort -u | grep -v '^$'
+          }
+
+          # Regex for extracting address from html
+          extract_address_from_html() {
+              local input="$1"
+              local regex='Kantor Pemasaran.*?((?:<[^>]+>)*)([\w\s\.\,\/\(\)\-]+\s*(?:(?:No|N0|RT|RW|Kec)\.\s*[\w\s\.\,\/\(\)\-]+)?\s*(?:(?:[0-9]{5})|(?:\d{1,4}(?:(?:\/\d{1,3})|\s*No)?(?:,\s*\w+)?(?:,\s*\w+)?(?:,\s*\w+)?(?:,\s*\w+)?(?:,\s*\w+)?)?)(?:<[^>]+>)*'
+                if [[ "$input" =~ $regex ]]; then
+                    echo "${BASH_REMATCH[2]}"
+                else
+                    echo ""
+                fi
+          }
+
+          # Function to process a single client
+          process_client() {
+            local LINE="$1"
+
+            WAURL=""
+            PHURL=""
+            NAME=""
+            PHONE=""
+            FILTER=""
+            ADDRESS=""
+
+            IFS='|' read -ra PARTS <<< "$LINE"
+
+            WAURL="${PARTS[0]}"
+            PHURL="${PARTS[1]}"
+            NAME="${PARTS[2]}"
+            PHONE="${PARTS[3]}"
+            FILTER="${PARTS[4]}"
+            ADDRESS="${PARTS[5]}"
+
+            NEW_PHONE_NAME="${PHONE} (${NAME})"
+
+            echo "Processing Client ($NAME):"
+
+            # Handle file selection based on FILTER
+            if [ -n "$FILTER" ]; then
+              FILTER_PATTERN=$(create_grep_pattern "$FILTER")
+              echo "Generated FILTER_PATTERN:"
+              echo "$FILTER_PATTERN"
+              FILE_LIST=$(find_matching_files "$FILTER_PATTERN" "$FILTER")
+            else
+              # For clients without filter, exclude files matching other clients' filters
+              ALL_FILES=$(find . -type f -name "*.html")
+              FILE_LIST="$ALL_FILES"
+
+              declare -A all_filters
+              while IFS= read -r other_client_line; do
+                  IFS='|' read -ra OTHER_PARTS <<< "$other_client_line"
+                  other_filter="${OTHER_PARTS[4]}"
+                  if [ -n "$other_filter" ]; then
+                      all_filters["$other_filter"]=1
+                  fi
+              done <<< "${{ env.client_data }}"
+
+              for f in "${!all_filters[@]}"; do
+                EXCLUDE_PATTERN=$(create_grep_pattern "$f")
+                EXCLUDE_FILES=$(find_matching_files "$EXCLUDE_PATTERN" "$f")
+                if [ -n "$EXCLUDE_FILES" ]; then
+                  FILE_LIST=$(comm -23 <(echo "$FILE_LIST" | sort) <(echo "$EXCLUDE_FILES" | sort))
+                fi
+              done
+            fi
+
+            # Check if FILE_LIST is empty
+            if [ -z "$FILE_LIST" ]; then
+              echo "No matching files found for Client  ($NAME)"
+              return
+            fi
+
+            # Update files
+            CHANGES_MADE=false
+            while IFS= read -r file; do
+              echo "Processing file: $file"
+
+              # Extract all necessary information
+              OLD_PHONE_NAME=$(awk -F'[<>]' '
+              /<div[^>]*class="[^"]*(whatsapp-floating|sms-floating|tlp-floating)[^"]*".*<span[^>]*>/ {
+                while (getline && !/<\/div>/) {
+                  if ($0 ~ /<span[^>]*>[0-9]{4} [0-9]{4} [0-9]{4}.*\([^)]+\)/) {
+                    match($0, /[0-9]{4} [0-9]{4} [0-9]{4}.*\([^)]+\)/, arr)
+                    print arr[0]
+                    exit
+                  }
+                }
+              }' "$file")
+
+              # Fallback logic for old phone name
+              if [ -z "$OLD_PHONE_NAME" ]; then
+                OLD_PHONE_NAME=$(awk -F'[<>]' '/<span[^>]*>[0-9]{4} [0-9]{4} [0-9]{4}.*\([^)]+\)/ {match($0, /[0-9]{4} [0-9]{4} [0-9]{4}.*\([^)]+\)/, arr); print arr[0]; exit}' "$file")
+              fi
+              echo "  Old Phone Name: $OLD_PHONE_NAME"
+
+              # Initialize OLD_PHONE and OLD_NAME
+              OLD_PHONE=""
+              OLD_NAME=""
+
+              # Simple splitting process
+              if [ -n "$OLD_PHONE_NAME" ]; then
+                # Extract phone (all numbers and spaces)
+                OLD_PHONE=$(echo "$OLD_PHONE_NAME" | grep -o '[0-9 ]\+' | xargs)
+
+                # Extract name (remove phone number and parentheses)
+                OLD_NAME=$(echo "$OLD_PHONE_NAME" | sed 's/[0-9 ]\+//g' | sed 's/[()]//g' | xargs)
+              else
+                echo "Warning: OLD_PHONE_NAME is empty"
+              fi
+              echo "  Old Phone: $OLD_PHONE"
+              echo "  Old Name: $OLD_NAME"
+
+              OLD_WAURL=$(awk '
+              /<div[^>]*class="[^"]*(whatsapp-floating|sms-floating)[^"]*"/ {
+                while (getline && !/<\/div>/) {
+                  if (match($0, /href="([^"]+)"/, arr)) {
+                    if ($0 ~ /[📞☎️]/) { next }  # Skip if contains phone emojis
+                    print arr[1]
+                    exit
+                  }
+                }
+              }' "$file")
+              # Fallback logic for wa url
+              if [ -z "$OLD_WAURL" ]; then
+                OLD_WAURL=$(awk '
+                  /https:\/\/((api\.whatsapp\.com|what\.sapp\.my\.id)|(klik|link)\.[^"\/]+)/ {
+                    if ($0 ~ /[📞☎️]/) { next }  # Skip if contains phone emojis
+                    match($0, /href="([^"]+)"/, arr)
+                    print arr[1]
+                    exit
+                  }' "$file")
+              fi
+              echo "  Old WA/SMS URL: $OLD_WAURL"
+
+              # Extracting phone url
+              OLD_PHURL=$(awk '
+              {
+                if ($0 ~ /<div[^>]*class="[^"]*tlp-floating[^"]*"/) {
+                  content = $0
+                  # Read subsequent lines until we find </div> or EOF
+                  while (1) {
+                    if (match(content, /href="([^"]+)"/, arr)) {
+                      if (content ~ /💬/) { next }  # Skip if contains WhatsApp emoji
+                      print arr[1]
+                      exit
+                    }
+                    # Break if we reach </div>
+                    if ($0 ~ /<\/div>/) { break }
+                    # Read the next line
+                    if (getline) {
+                      content = content "\n" $0
+                    } else {
+                      break  # EOF
+                    }
+                  }
+                }
+              }' "$file")
+              # Fallback logic for ph url
+              if [ -z "$OLD_PHURL" ]; then
+                OLD_PHURL=$(awk '
+                  /href="((https?:\/\/((con\.tact\.my\.id)|(klik|link)\.[^"\/]+))|(tel:[^"]*[+]?[^"]+))"/ {
+                    if ($0 ~ /💬/) { next }  # Skip if contains WhatsApp emoji
+                    match($0, /href="([^"]+)"/, arr)
+                    print arr[1]
+                    exit
+                  }' "$file")
+              fi
+              echo "  Old Phone URL: $OLD_PHURL"
+
+              OLD_ADDRESS=$(extract_address_from_html "$(<"$file")")
+              echo "  Old Address: $OLD_ADDRESS"
+
+              if [ -z "$OLD_PHONE_NAME" ] || [ -z "$OLD_WAURL" ] || [ -z "$OLD_PHURL" ]; then
+                echo "Error: Unable to extract one or more of the following from $file:"
+                [ -z "$OLD_PHONE_NAME" ] && echo "- Old Phone Name"
+                [ -z "$OLD_WAURL" ] && echo "- Old WhatsApp/SMS URL"
+                [ -z "$OLD_PHURL" ] && echo "- Old Phone URL"
+                echo "Please check the HTML structure and update the extraction logic if necessary."
+                echo "Skipping operation for this file and moving to the next."
+                continue
+              fi
+
+              # Compare and update if different
+              if [ "$OLD_PHONE_NAME" != "$NEW_PHONE_NAME" ] || [ "$OLD_PHONE" != "$PHONE" ] || [ "$OLD_NAME" != "$NAME" ] || [ "$OLD_WAURL" != "$WAURL" ] || [ "$OLD_PHURL" != "$PHURL" ] || [ "$OLD_ADDRESS" != "$ADDRESS" ]; then
+                # Escape special characters for all variables
+                OLD_PHONE_NAME_ESCAPED=$(escape_for_sed "$OLD_PHONE_NAME")
+                NEW_PHONE_NAME_ESCAPED=$(escape_for_sed "$NEW_PHONE_NAME")
+                OLD_PHONE_ESCAPED=$(escape_for_sed "$OLD_PHONE")
+                NEW_PHONE_ESCAPED=$(escape_for_sed "$PHONE")
+                OLD_NAME_ESCAPED=$(escape_for_sed "$OLD_NAME")
+                NEW_NAME_ESCAPED=$(escape_for_sed "$NAME")
+                OLD_WAURL_ESCAPED=$(escape_for_sed "$OLD_WAURL")
+                NEW_WAURL_ESCAPED=$(escape_for_sed "$WAURL")
+                OLD_PHURL_ESCAPED=$(escape_for_sed "$OLD_PHURL")
+                NEW_PHURL_ESCAPED=$(escape_for_sed "$PHURL")
+                OLD_ADDRESS_ESCAPED=$(escape_for_sed "$OLD_ADDRESS")
+                NEW_ADDRESS_ESCAPED=$(escape_for_sed "$ADDRESS")
+
+                # Perform replacements
+                if [ -n "$OLD_PHONE_NAME" ] && [ -n "$NEW_PHONE_NAME" ]; then
+                  sed -i "s|$OLD_PHONE_NAME_ESCAPED|$NEW_PHONE_NAME_ESCAPED|g" "$file"
+                fi
+                if [ -n "$OLD_WAURL" ] && [ -n "$WAURL" ]; then
+                  sed -i "s|href=\"$OLD_WAURL_ESCAPED\"|href=\"$NEW_WAURL_ESCAPED\"|g" "$file"
+                fi
+                if [ -n "$OLD_PHURL" ] && [ -n "$PHURL" ]; then
+                  sed -i "s|href=\"$OLD_PHURL_ESCAPED\"|href=\"$NEW_PHURL_ESCAPED\"|g" "$file"
+                fi
+                if [ -n "$OLD_PHONE" ] && [ -n "$PHONE" ]; then
+                  sed -i "s|$OLD_PHONE_ESCAPED|$NEW_PHONE_ESCAPED|g" "$file"
+                fi
+                if [ -n "$OLD_NAME" ] && [ -n "$NAME" ]; then
+                  sed -i "s|$OLD_NAME_ESCAPED|$NEW_NAME_ESCAPED|g" "$file"
+                fi
+                if [ -n "$OLD_ADDRESS" ] && [ -n "$ADDRESS" ]; then
+                  sed -i "s|$OLD_ADDRESS_ESCAPED|$NEW_ADDRESS_ESCAPED|g" "$file"
+                fi
+
+                CHANGES_MADE=true
+                echo "Updated file: $file"
+              else
+                echo "No changes needed for file: $file"
+              fi
+            done <<< "$FILE_LIST"
+
+            if [ "$CHANGES_MADE" = true ]; then
+              echo "Changes were made for Client  ($NAME)"
+            else
+              echo "No changes were necessary for Client  ($NAME)"
+            fi
+
+            echo "----------------------------------------"
+          }
+
+           while IFS= read -r client_line; do
+             process_client "$client_line"
+           done <<< "${{ env.client_data }}"
+
+      - name: Commit and push changes
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          if ! git diff --quiet; then
+            git add .
+            git commit -m "Update multiple clients' information"
+            git remote set-url origin https://x-access-token:${{ secrets.GH_PAT }}@github.com/${{ github.repository }}
+            git push origin HEAD:main
+          else
+            echo "No changes to commit."
+          fi
