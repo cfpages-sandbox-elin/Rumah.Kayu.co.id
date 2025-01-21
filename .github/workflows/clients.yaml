@@ -1,4 +1,4 @@
-name: Update Multiple Clients v.9.12
+name: Update Multiple Clients v.9.13
 
 on:
   push:
@@ -345,11 +345,12 @@ jobs:
               OLD_ADDRESS=$(extract_address_from_html "$(<"$file")")
               echo "  Old Address: $OLD_ADDRESS"
 
-              if [ -z "$OLD_PHONE_NAME" ] || [ -z "$OLD_WAURL" ] || [ -z "$OLD_PHURL" ]; then
+              if [ -z "$OLD_PHONE_NAME" ] || [ -z "$OLD_WAURL" ] || [ -z "$OLD_PHURL" ] || [ -z "$OLD_ADDRESS" ]; then
                 echo "Error: Unable to extract one or more of the following from $file:"
                 [ -z "$OLD_PHONE_NAME" ] && echo "- Old Phone Name"
                 [ -z "$OLD_WAURL" ] && echo "- Old WhatsApp/SMS URL"
                 [ -z "$OLD_PHURL" ] && echo "- Old Phone URL"
+                [ -z "$OLD_ADDRESS" ] && echo "- Old Address"
                 echo "Please check the HTML structure and update the extraction logic if necessary."
                 echo "Skipping operation for this file and moving to the next."
                 continue
