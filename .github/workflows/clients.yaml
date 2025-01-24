@@ -1,4 +1,4 @@
-name: Update Multiple Clients v.9.13
+name: Update Multiple Clients v.9.14
 
 on:
   push:
@@ -86,7 +86,7 @@ jobs:
         run: |
           # Function to escape special characters for sed
           escape_for_sed() {
-            echo "$1" | sed -e 's/[\/&]/\\&/g'
+            echo "$1" | sed -e 's/[\/&[\]$.^(){}\\|?+*]/\\&/g'
           }
 
           # Function to create grep pattern from filter
@@ -186,7 +186,7 @@ jobs:
               grep -oE "^(Jl\\.|Jalan|Ruko|Perumahan)\\s+.*" <<< "$input"
           }
 
-          # Function to process a single client
+                    # Function to process a single client
           process_client() {
             local LINE="$1"
 
@@ -351,10 +351,26 @@ jobs:
                 [ -z "$OLD_WAURL" ] && echo "- Old WhatsApp/SMS URL"
                 [ -z "$OLD_PHURL" ] && echo "- Old Phone URL"
                 [ -z "$OLD_ADDRESS" ] && echo "- Old Address"
-                echo "Please check the HTML structure and update the extraction logic if necessary."
-                echo "Skipping operation for this file and moving to the next."
+                echo "Please check the HTML structure and update the extraction logic if necessary. Skipping operation for this file and moving to the next."
                 continue
               fi
+
+              # --- ADDED VARIABLE PRINTING ---
+              echo "--- Variable Values Before Comparison ---"
+              echo "OLD_PHONE_NAME: $OLD_PHONE_NAME"
+              echo "NEW_PHONE_NAME: $NEW_PHONE_NAME"
+              echo "OLD_PHONE: $OLD_PHONE"
+              echo "PHONE: $PHONE"
+              echo "OLD_NAME: $OLD_NAME"
+              echo "NAME: $NAME"
+              echo "OLD_WAURL: $OLD_WAURL"
+              echo "WAURL: $WAURL"
+              echo "OLD_PHURL: $OLD_PHURL"
+              echo "PHURL: $PHURL"
+              echo "OLD_ADDRESS: $OLD_ADDRESS"
+              echo "ADDRESS: $ADDRESS"
+              echo "--- End Variable Values ---"
+              # --- END ADDED VARIABLE PRINTING ---
 
               # Compare and update if different
               if [ "$OLD_PHONE_NAME" != "$NEW_PHONE_NAME" ] || [ "$OLD_PHONE" != "$PHONE" ] || [ "$OLD_NAME" != "$NAME" ] || [ "$OLD_WAURL" != "$WAURL" ] || [ "$OLD_PHURL" != "$PHURL" ] || [ "$OLD_ADDRESS" != "$ADDRESS" ]; then
