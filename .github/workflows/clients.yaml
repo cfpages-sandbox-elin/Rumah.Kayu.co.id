@@ -1,4 +1,4 @@
-name: Update Multiple Clients v.9.14
+name: Update Multiple Clients v.10.00
 
 on:
   push:
@@ -16,36 +16,33 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v2
 
-      - name: Check if .clients file exists
-        id: check_clients
-        run: if [[ -f .clients ]]; then echo "exists=true" >> $GITHUB_ENV; else echo "exists=false" >> $GITHUB_ENV; fi
-
-      - name: Abort if .clients file does not exist
-        if: env.exists == 'false'
-        run: echo "No .clients file found, aborting operation." && exit 1
-
-      - name: Check if .clients file is empty
-        if: env.exists == 'true'
+      - name: Check and Parse .clients file
+        id: parse_clients_file
         run: |
+          if [[ ! -f .clients ]]; then
+            echo "No .clients file found, aborting operation."
+            exit 1
+          fi
           if [[ ! -s .clients ]]; then
-            echo "File is empty, nothing to do." && exit 0
+            echo "File is empty, nothing to do."
+            exit 0
           fi
 
-      - name: Identify Clients in .clients
-        if: env.exists == 'true'
-        id: identify_clients
-        run: |
-          CLIENT_DATA=""
-          CLIENT_NUM=1
-
+          CLIENT_DATA_JSON="["
+          FIRST_CLIENT=true
           while IFS= read -r LINE; do
+            if ! $FIRST_CLIENT; then
+              CLIENT_DATA_JSON+=","
+            fi
+            FIRST_CLIENT=false
+
             WAURL=""
             PHURL=""
             NAME=""
             PHONE=""
             FILTER=""
             ADDRESS=""
-             IFS='|' read -ra PARTS <<< "$LINE"
+            IFS='|' read -ra PARTS <<< "$LINE"
 
             for PART in "${PARTS[@]}"; do
               TRIMMED_PART="$(echo "$PART" | xargs)"
@@ -65,21 +62,15 @@ jobs:
                   FILTER=$TRIMMED_PART
               fi
             done
-           echo "Processing Client $CLIENT_NUM ($NAME):"
-           echo "WAURL: $WAURL"
-           echo "PHURL: $PHURL"
-           echo "NAME: $NAME"
-           echo "PHONE: $PHONE"
-           echo "FILTER: $FILTER"
-           echo "ADDRESS: $ADDRESS"
 
-           CLIENT_DATA="$CLIENT_DATA"$"$WAURL|$PHURL|$NAME|$PHONE|$FILTER|$ADDRESS\n"
-             ((CLIENT_NUM++))
+            CLIENT_DATA_JSON+="{ \"WAURL\": \"$(jq -sRr @json <<<"$WAURL")\", \"PHURL\": \"$(jq -sRr @json <<<"$PHURL")\", \"NAME\": \"$(jq -sRr @json <<<"$NAME")\", \"PHONE\": \"$(jq -sRr @json <<<"$PHONE")\", \"FILTER\": \"$(jq -sRr @json <<<"$FILTER")\", \"ADDRESS\": \"$(jq -sRr @json <<<"$ADDRESS")\" }"
           done < .clients
+          CLIENT_DATA_JSON+="]"
 
-          echo "client_data<<EOF" >> $GITHUB_ENV
-          echo "${CLIENT_DATA}" >> $GITHUB_ENV
-          echo "EOF" >> $GITHUB_ENV
+          echo "client_data_json=$CLIENT_DATA_JSON" >> $GITHUB_ENV
+          echo "file_exists=true" >> $GITHUB_ENV
+        env:
+          exists: true # Default, overwritten if checks pass
 
       - name: Process Replace Clients
         if: env.exists == 'true'
@@ -183,28 +174,21 @@ jobs:
           # Regex for extracting address from html
           extract_address_from_html() {
               local input="$1"
-              grep -oE "^(Jl\\.|Jalan|Ruko|Perumahan)\\s+.*" <<< "$input"
+              grep -oE "^(Jl\\.|Jalan|Ruko|Perumahan)\\s+.*" <<< "$input" || true # Added || true to prevent exit on no match
           }
 
-                    # Function to process a single client
+          # Function to process a single client (now accepts parsed client data)
           process_client() {
-            local LINE="$1"
+            local client_data="$1" # Expecting a JSON object string
 
-            WAURL=""
-            PHURL=""
-            NAME=""
-            PHONE=""
-            FILTER=""
-            ADDRESS=""
+            # Parse JSON data
+            WAURL=$(echo "$client_data" | jq -r .WAURL)
+            PHURL=$(echo "$client_data" | jq -r .PHURL)
+            NAME=$(echo "$client_data" | jq -r .NAME)
+            PHONE=$(echo "$client_data" | jq -r .PHONE)
+            FILTER=$(echo "$client_data" | jq -r .FILTER)
+            ADDRESS=$(echo "$client_data" | jq -r .ADDRESS)
 
-            IFS='|' read -ra PARTS <<< "$LINE"
-
-            WAURL="${PARTS[0]}"
-            PHURL="${PARTS[1]}"
-            NAME="${PARTS[2]}"
-            PHONE="${PARTS[3]}"
-            FILTER="${PARTS[4]}"
-            ADDRESS="${PARTS[5]}"
 
             NEW_PHONE_NAME="${PHONE} (${NAME})"
 
@@ -222,13 +206,13 @@ jobs:
               FILE_LIST="$ALL_FILES"
 
               declare -A all_filters
-              while IFS= read -r other_client_line; do
-                  IFS='|' read -ra OTHER_PARTS <<< "$other_client_line"
-                  other_filter="${OTHER_PARTS[4]}"
+              CLIENTS_JSON="${{ env.client_data_json }}"
+              jq -c '.[]' <<< "$CLIENTS_JSON" | while read client; do
+                  other_filter=$(echo "$client" | jq -r .FILTER)
                   if [ -n "$other_filter" ]; then
                       all_filters["$other_filter"]=1
                   fi
-              done <<< "${{ env.client_data }}"
+              done
 
               for f in "${!all_filters[@]}"; do
                 EXCLUDE_PATTERN=$(create_grep_pattern "$f")
@@ -260,11 +244,11 @@ jobs:
                     exit
                   }
                 }
-              }' "$file")
+              }' "$file" || true) # Added || true to prevent exit on no match
 
               # Fallback logic for old phone name
               if [ -z "$OLD_PHONE_NAME" ]; then
-                OLD_PHONE_NAME=$(awk -F'[<>]' '/<span[^>]*>[0-9]{4} [0-9]{4} [0-9]{4}.*\([^)]+\)/ {match($0, /[0-9]{4} [0-9]{4} [0-9]{4}.*\([^)]+\)/, arr); print arr[0]; exit}' "$file")
+                OLD_PHONE_NAME=$(awk -F'[<>]' '/<span[^>]*>[0-9]{4} [0-9]{4} [0-9]{4}.*\([^)]+\)/ {match($0, /[0-9]{4} [0-9]{4} [0-9]{4}.*\([^)]+\)/, arr); print arr[0]; exit}' "$file" || true) # Added || true to prevent exit on no match
               fi
               echo "  Old Phone Name: $OLD_PHONE_NAME"
 
@@ -275,10 +259,10 @@ jobs:
               # Simple splitting process
               if [ -n "$OLD_PHONE_NAME" ]; then
                 # Extract phone (all numbers and spaces)
-                OLD_PHONE=$(echo "$OLD_PHONE_NAME" | grep -o '[0-9 ]\+' | xargs)
+                OLD_PHONE=$(echo "$OLD_PHONE_NAME" | grep -o '[0-9 ]\+' | xargs || true) # Added || true to prevent exit on no match
 
                 # Extract name (remove phone number and parentheses)
-                OLD_NAME=$(echo "$OLD_PHONE_NAME" | sed 's/[0-9 ]\+//g' | sed 's/[()]//g' | xargs)
+                OLD_NAME=$(echo "$OLD_PHONE_NAME" | sed 's/[0-9 ]\+//g' | sed 's/[()]//g' | xargs || true) # Added || true to prevent exit on no match
               else
                 echo "Warning: OLD_PHONE_NAME is empty"
               fi
@@ -294,7 +278,7 @@ jobs:
                     exit
                   }
                 }
-              }' "$file")
+              }' "$file" || true) # Added || true to prevent exit on no match
               # Fallback logic for wa url
               if [ -z "$OLD_WAURL" ]; then
                 OLD_WAURL=$(awk '
@@ -303,7 +287,7 @@ jobs:
                     match($0, /href="([^"]+)"/, arr)
                     print arr[1]
                     exit
-                  }' "$file")
+                  }' "$file" || true) # Added || true to prevent exit on no match
               fi
               echo "  Old WA/SMS URL: $OLD_WAURL"
 
@@ -329,20 +313,19 @@ jobs:
                     }
                   }
                 }
-              }' "$file")
+              }' "$file" || true) # Added || true to prevent exit on no match
               # Fallback logic for ph url
               if [ -z "$OLD_PHURL" ]; then
                 OLD_PHURL=$(awk '
                   /href="((https?:\/\/((con\.tact\.my\.id)|(klik|link)\.[^"\/]+))|(tel:[^"]*[+]?[^"]+))"/ {
                     if ($0 ~ /💬/) { next }  # Skip if contains WhatsApp emoji
                     match($0, /href="([^"]+)"/, arr)
-                    print arr[1]
                     exit
-                  }' "$file")
+                  }' "$file" || true) # Added || true to prevent exit on no match
               fi
               echo "  Old Phone URL: $OLD_PHURL"
 
-              OLD_ADDRESS=$(extract_address_from_html "$(<"$file")")
+              OLD_ADDRESS=$([[ -z "$(extract_address_from_html "$(<"$file")")" ]] && echo "" || extract_address_from_html "$(<"$file")") # Modified address extraction to use conditional to avoid empty string issues and added || true in function
               echo "  Old Address: $OLD_ADDRESS"
 
               if [ -z "$OLD_PHONE_NAME" ] || [ -z "$OLD_WAURL" ] || [ -z "$OLD_PHURL" ] || [ -z "$OLD_ADDRESS" ]; then
@@ -424,11 +407,13 @@ jobs:
             echo "----------------------------------------"
           }
 
-           while IFS= read -r client_line; do
-             process_client "$client_line"
-           done <<< "${{ env.client_data }}"
+          CLIENTS_JSON="${{ env.client_data_json }}"
+          jq -c '.[]' <<< "$CLIENTS_JSON" | while read client; do
+             process_client "$client"
+           done
 
       - name: Commit and push changes
+        if: env.exists == 'true'
         run: |
           git config --global user.name 'github-actions[bot]'
           git config --global user.email '41898282+github-actions[bot]@users.noreply.github.com'
